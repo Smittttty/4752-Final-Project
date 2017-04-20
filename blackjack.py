@@ -2,6 +2,8 @@ import pygame
 from settings import *
 import time
 import random
+import threading
+from prettytable import PrettyTable
 
 class BlackjackRL:
     def __init__(self):
@@ -9,7 +11,7 @@ class BlackjackRL:
         pygame.display.set_caption("Blackjack")
         pygame.key.set_repeat(500, 100)
         self.__cols = 10
-        self.__rows = 32
+        self.__rows = 28
         self.__width = (self.__cols + 1) * 64
         self.__height = (self.__rows + 1) * 15
         self.__screen = pygame.display.set_mode((self.__width, self.__height))
@@ -19,42 +21,57 @@ class BlackjackRL:
         self.__deck = Deck()
         self.current_hand = []
         self.dealer_hand = []
-       
+        self.states = set()
+        self.updates = 0
+        self.episode_gen_policy = self.greedy_naive #self.random_state #self.epsilon_greedy #self.greedy_naive
+        self.epsilon = 0.20
 
     def __init_grid(self):
-        self.__hand_states = [(0, "5", 5, 0),(1, "6", 6, 0),(2, "7", 7, 0),(3, "8", 8, 0),(4, "9", 9, 0),(5, "10", 10, 0),(6, "11", 11, 0),(7, "12", 12, 0),(8, "13", 13, 0),(9, "14", 14, 0),(10, "15", 15, 0),(11, "16", 16, 0),(12, "17", 17, 0),(13, "18+", 18, 0),(14, "Pair 2", 2, 1),(15, "Pair 3", 3, 1),(16, "Pair 4", 4, 1),(17, "Pair 5", 5, 1),(18, "Pair 6", 6, 1),(19, "Pair 7", 7, 1),(20, "Pair 8", 8, 1),(21, "Pair 9", 9, 1),(22, "Pair 10", 10, 1)]
-        self.__dealer_hand_states = [i for i in range(2, 12)]
-        self.__grid = [[0 for x in range(self.__cols)] for y in range(self.__rows)] 
-        self.values = [[0 for x in range(self.__cols)] for y in range(self.__rows)] 
-        self.rewards = [[-self.bet_amount for x in range(self.__cols)] for y in range(self.__rows)] 
+        self.values = {}
         self.__set_inital_policy()
 
     def __set_inital_policy(self):
-        self.policy = [[[] for x in range(self.__cols)] for y in range(self.__rows)] 
-        for r in range(self.__rows):
-            for c in range(self.__cols):
-                # for every non-terminal state, set an equiprobable policy of moving in a legal direction
-                # here, 'legal' will be an array of 1s and 0s, 1 indicating that LEGAL_ACTIONS[i] is legal
-                legal = [1 for action in LEGAL_ACTIONS]
-                # we can sum the binary array to get the number of legal actions at this state
-                num_legal = sum(legal)
-                # so now the equiprobable policy is just dividing each element of the binary array by the number of actions
-                state_policy = [i/num_legal for i in legal]
-                # set the current policy
-                self.policy[r][c] = state_policy
-                # set the class policy to this initial policy we just created
+        self.policy = {}
 
+    #draw states
     def update(self):
         self.__events()
-        for r in range(self.__rows):
-            for c in range(self.__cols):
-                self.__draw_strategy(self.__screen, r, c, 0 if self.policy[r][c][0] == 1 else 1)
-        for state in self.__hand_states:
-            self.__draw_tile(self.__screen, state[0] + 1, 0, state[1], (255, 255, 255))
-        for state in self.__dealer_hand_states:
-            title = str(state) if state < 11 else "A"
-            self.__draw_tile(self.__screen, 0, state -1, title, (255, 255, 255))
+        state_to_draw = None
+        for state in self.policy.keys():
+            r = state[0]
+            if(state[1] == 1):
+                r += 10  
+            self.__draw_strategy(self.__screen, r-4, state[2] - 2, self.policy[state].index(max(self.policy[state])))
+            self.__draw_tile(self.__screen, r-3, 0, ("Soft " if state[1] == 1 else "") + str(state[0]), (255, 255, 255))
+            rect = pygame.Rect((state[2] - 1) * 64, (r-3) * 15, 64, 15)
+            if(rect.collidepoint(pygame.mouse.get_pos())):
+                state_to_draw = state
+
+        for i in range(2, 12):
+            self.__draw_tile(self.__screen, 0, i-1, (str(i) if i < 11 else "A"), (255, 255, 255))
+        label = self.__font.render(str(self.updates), 1, (255, 255, 255), (0, 0, 0, 0.5))
+        self.__screen.blit(label, (2, 2))
+        if(state_to_draw != None):
+            self.draw_details(state_to_draw)
         pygame.display.flip()
+    
+    #draw details menu
+    def draw_details(self, state):
+        self.draw_bordered_text(self.__screen, str(state), 5, self.__height - 113, CYAN, BLACK)
+        best = self.policy[state].index(max(self.policy[state]))
+        draw_index = 0
+        for i in range(len(LEGAL_ACTIONS)):
+            action = LEGAL_ACTIONS[i]
+            if not (state, action) in self.values.keys(): 
+                continue
+            text_color = GREEN if i == best else WHITE
+            avg = format(self.values[(state, action)]['sum'] / self.values[(state, action)]['plays'], '.2f')
+            self.draw_bordered_text(self.__screen, STRATEGY_TYPE_CAPTION[i] + ": " + str(avg), 5, self.__height - 100 + (draw_index*13), STRATEGY_TYPE_COLOR[i], BLACK)
+            draw_index+=1 
+        
+    def draw_bordered_text(self, surface, text, x, y, fg_color, bg_color):
+        label2 = self.__font.render(text, 0, fg_color, bg_color)
+        surface.blit(label2, (x, y))
 
     def __draw_tile(self, surface, row, col, name, color):
         surface.fill(color, (col * 64, row * 15, 64, 15))
@@ -71,137 +88,158 @@ class BlackjackRL:
         label = self.__font.render(STRATEGY_TYPE_CAPTION[sType], 1, (0, 0, 0))
         font_size = self.__font.size(STRATEGY_TYPE_CAPTION[sType])
         surface.blit(label, ((col * 64) + 32 - (font_size[0]/2), (row * 15) + 8 - (font_size[1]/2)))
+
+    def play_dealer(self, current_count, dealer_hand):
+        while dealer_hand.count <= current_count and dealer_hand.count < 17:
+            dealer_hand.add_card(self.__deck.deal())
+
+    def get_legal_actions(self, hand):
+        actions = [STAND]
+        if(hand.count < 21):
+            actions.append(HIT)
+            if(len(hand.cards) == 2):
+                actions.append(DOUBLE)
+        return actions
+
+    #random policy
+    def random_state(self, state, hand):
+        return random.choice(self.get_legal_actions(hand))
     
-    def is_legal_action(self, action):
-        if(action == DOUBLE or action == SPLIT):
-            return False
-        if(action == STAND):
-            return True
-        return self.get_hand_value(self.current_hand) < 21
+    #epsilon greedy policy
+    def epsilon_greedy(self, state, hand):
+        if(not state in self.policy.keys()):
+            return self.random_state(state, hand)
+        best = self.policy[state].index(max(self.policy[state]))
+        if(random.randint(0, 100000) < 100000 * self.epsilon):
+            return self.random_state(state, hand)
+        return best
+    #greedy naive policy
+    def greedy_naive(self, state, hand):
+        self.epsilon = 0
+        return self.epsilon_greedy(state, hand)
 
-    def get_value(self, r, c):      return self.values[r][c]
-    def get_reward(self, r, c):     return self.rewards[r][c]
-    def get_policy(self, r, c):     return self.policy[r][c] 
+    #play a game vs the dealer
+    def play_game(self):
+        current_hand = Hand()
+        current_hand.add_card(self.__deck.deal())
+        current_hand.add_card(self.__deck.deal())
+        dealer_hand = Hand()
+        dealer_hand.add_card(self.__deck.deal())
+        playedDouble = False
 
-    def hit(self, hand):
-        hand.append(self.__deck.deal())
-    
-    def play_dealer(self, current_hand, dealer_card):
-        while(dealer_card <= current_hand):
-            dealer_card += self.__deck.deal().get_value()
-
-        return 0 if dealer_card > 21 else (1 if dealer_card > current_hand else 2)
-
-    def get_hand_value(self, hand):
-        return sum(map(lambda c: c.get_value(), hand))
-
-    def get_winner(self):
-        current_hand_value = self.get_hand_value(self.current_hand)
-        dealer_hand = self.get_hand_value(self.dealer_hand)
-        if(current_hand_value > 21):
-            return -self.bet_amount
-        if(dealer_hand > 21 or current_hand_value > dealer_hand):
-            return self.bet_amount
-        if(dealer_hand > current_hand_value):
-            return -self.bet_amount
-
-
-    def get_rc(self, hand_value, dealer_card):
-        row = -1
-        for state in self.__hand_states:
-            if(state[2] == hand_value):
-                row = state[0]
+        while True:
+            if(current_hand.count > 21 or playedDouble):
                 break
-        if(hand_value >= 18):
-            row = 13
-        col = dealer_card - 2
-        return row, col
+            state = (current_hand.count, 0 if current_hand.aces == 0 else 1, dealer_hand.count)
+            action = self.policy[state].index(max(self.policy[state]))
+            if action == HIT:
+                current_hand.add_card(self.__deck.deal())
+            if action == DOUBLE:
+                playedDouble = True
+                current_hand.add_card(self.__deck.deal())
+            if action == STAND:
+                break
+        if(current_hand.count <= 21):
+            self.play_dealer(current_hand.count, dealer_hand)
 
-    def get_card_prob(self, value):
-        if (value < 10 or value > 10):
-            return 4.0/52.0
-        else:
-            return 16.0/52.0
+        returnVal = PUSH
 
-    def get_dealer_probs(self, hand_value, first_card):
-        busts = 0
-        wins = 0
-        draws = 0
-        for i in range(100):
-            result = self.play_dealer(hand_value, first_card)
-            if result == 0:
-                busts += 1
-            elif result == 1:
-                wins += 1
-            else:
-                draw += 1
-        return (busts/100.0 * self.bet_amount) - (wins/100.0 * self.bet_amount)
+        if(current_hand.count > 21):
+            returnVal = PLAYER_BUST
+        elif(dealer_hand.count > 21):
+            returnVal = DEALER_BUST
+        elif(current_hand.count > dealer_hand.count):
+            returnVal = PLAYER_WIN
+        elif(current_hand.count < dealer_hand.count):
+            returnVal = DEALER_WIN
+
+        return returnVal
 
     def update_value(self):
-        self.current_hand = [self.__deck.deal(), self.__deck.deal()]
-        self.dealer_hand = [self.__deck.deal()]
-        hand_value = self.get_hand_value(self.current_hand)
-        dealer_card_value = self.dealer_hand[0].get_value()
-        #print("hand val: " + str(hand_value))
-        #print("dealer val: " + str(dealer_card_value))
+        self.updates += 1
+        dealer_hand = Hand()
+        current_hand = Hand()
 
-        row, col = self.get_rc(hand_value, self.dealer_hand[0].get_value())
-        #print("updating: " + str((row, col)))
-        new_values = [[0]*self.__cols for i in range(self.__rows)]
-        for i in range(len(LEGAL_ACTIONS)):
-            if not self.is_legal_action(LEGAL_ACTIONS[i]):
-                continue
-            if LEGAL_ACTIONS[i] == HIT:
-                ## first part
-                ## second part
-                second_sum = 0
-                for v in range(13):
-                    c = Card(0, v if v < 10 and v > 1 else (11 if v == 1 else 10))
-                    prob = self.get_card_prob(c.get_value())
-                    new_hand_value = hand_value + c.get_value()
-                    r, c = self.get_rc(new_hand_value, dealer_card_value)
-                    reward = -self.bet_amount
-                    if(new_hand_value <= 21):
-                        reward = self.get_reward(r, c)
-                    value = -self.bet_amount
-                    if(new_hand_value <= 21):
-                        value = self.get_value(r, c)
-                    second_sum += prob * (reward + (GAMMA * value))
+        #setup hands
+        current_hand.add_card(self.__deck.deal())
+        current_hand.add_card(self.__deck.deal())
+        dealer_hand.add_card(self.__deck.deal())
 
-                    next_state_value =  value
-                    probability      =  self.policy[row][col][i]
-                    reward           =  self.get_reward(row, col)
-                    new_values[row][col] += probability * (reward + GAMMA * next_state_value)
-                new_values[row][col] *= second_sum
+        episode = []
+        playedDouble = False
 
-            if LEGAL_ACTIONS[i] == STAND:
-                new_values[row][col] += self.get_dealer_probs(hand_value, dealer_card_value)
+        #play out an episode
+        while True:
+            if(current_hand.count > 21 or playedDouble):
+                break
+            state = (current_hand.count, 0 if current_hand.aces == 0 else 1, dealer_hand.count)
+            self.states.add(state)
+            action = self.episode_gen_policy(state, current_hand)
+            sa = (state, action)
+            episode.append(sa)
+            if action == HIT:
+                current_hand.add_card(self.__deck.deal())
+            if action == DOUBLE:
+                playedDouble = True
+                current_hand.add_card(self.__deck.deal())
+            if action == STAND:
+                break
+        
+        #determine winner
+        if(current_hand.count <= 21):
+            self.play_dealer(current_hand.count, dealer_hand)
 
-        self.values = new_values
+        bet_return = 0
+        if(current_hand.count > 21):
+            bet_return = -self.bet_amount
+        elif(dealer_hand.count > 21):
+            bet_return = self.bet_amount
+        elif(current_hand.count > dealer_hand.count):
+            bet_return = self.bet_amount
+        elif(current_hand.count < dealer_hand.count):
+            bet_return = -self.bet_amount
 
+        if(playedDouble):
+            bet_return *= 2
+
+        #update values
+        for scene in episode:
+            if not scene in self.values.keys():
+                self.values[scene] = {}
+                self.values[scene]['sum'] = 0
+                self.values[scene]['plays'] = 0
+                self.values[scene]['value'] = 0
+            self.values[scene]['plays'] += 1.0
+            self.values[scene]['sum'] += bet_return
+            ALPHA = 1.0/self.values[scene]['plays']
+            self.values[scene]['value'] += ALPHA * (bet_return - self.values[scene]['value'])
+
+    #update policy
     def update_policy(self):
-        value = 0
-        hand_value = self.get_hand_value(self.current_hand)
-        dealer_card_value = self.dealer_hand[0].get_value()
-        row, col = self.get_rc(hand_value, dealer_card_value)
-        stand_value = self.get_value(row, col)
-        policy = []
-        for v in range(13):
-            card = Card(0, v if v < 10 and v > 1 else (11 if v == 1 else 10))
-            r, c = self.get_rc(hand_value + card.get_value(), dealer_card_value)
-            value += self.get_value(r, c) * self.get_card_prob(card.get_value())
-        stand_prob = 0
-        hit_prob = 0
-
-        if(stand_value > value):
-            stand_prob = 1
-        elif(stand_value < value):
-            hit_prob = 1
-        else:
-            hit_prob = stand_prob = 0.5
-
-        policy = [stand_prob, hit_prob]
-        self.policy[row][col] = policy
+        policy = {}
+        for state in self.states:
+            best = -1000000
+            best_actions = []
+            #loop actions
+            for i in range(len(LEGAL_ACTIONS)):
+                action = LEGAL_ACTIONS[i]
+                if(not (state, action) in self.values.keys()):
+                    continue
+                value = self.values[(state, action)]['value']# self.values[(state, action)]['sum'] / self.values[(state, action)]['plays']
+                #find best action
+                if(value > best):
+                    best = value
+                    best_actions = [i]
+                elif(value == best):
+                    best_actions.append(i)
+            policy[state] = []
+            #update policies
+            for i in range(len(LEGAL_ACTIONS)):
+                if i in best_actions:
+                    policy[state].append(1/len(best_actions))
+                else:
+                    policy[state].append(0)
+        self.policy = policy
 
     # events and input handling
     def __events(self):
@@ -209,12 +247,27 @@ class BlackjackRL:
             if event.type == pygame.QUIT:
                 exit()
             if event.type == pygame.KEYDOWN:
-                print("event yo!")
                 if event.key == pygame.K_s:      self.update_value(); self.update_policy()
                 if event.key == pygame.K_v:      self.update_value()
                 if event.key == pygame.K_p:      self.update_policy()
 
 
+#hand class
+class Hand:
+    def __init__(self):
+        self.count = 0
+        self.cards = []
+        self.aces = 0
+    
+    def add_card(self, card):
+        self.count += card.get_value()
+        self.cards.append(card)
+        if card.get_value() == 11:
+            self.aces += 1
+        while self.count > 21 and self.aces > 0:
+            self.count -= 10
+            self.aces -= 1
+#card class
 class Card:
     def __init__(self, suit, value):
         self.__suit = suit
@@ -222,6 +275,7 @@ class Card:
     def get_suit(self): return self.__suit
     def get_value(self): return self.__value
 
+#deck class
 class Deck:
     def __init__(self):
         self.__cards = []
@@ -238,9 +292,42 @@ class Deck:
 
 b = BlackjackRL()
 
+#seperate updates from rendering so it is faster
+def updates(b):
+    while True:
+        b.update_value()
+        b.update_policy()
+        if(b.updates == 100000):
+            break
+
+    results = {}
+    results[PUSH] = 0.0
+    results[DEALER_BUST] = 0.0
+    results[PLAYER_BUST] = 0.0
+    results[DEALER_WIN] = 0.0
+    results[PLAYER_WIN] = 0.0
+
+    games_to_play = 100000
+    for i in range(games_to_play):
+        results[b.play_game()] += 1.0
+
+    win = str(((results[PLAYER_WIN] + results[DEALER_BUST]) / games_to_play) * 100) + "%"
+    loss = str(((results[DEALER_WIN] + results[PLAYER_BUST]) / games_to_play) * 100) + "%"
+    push = str((results[PUSH] / games_to_play) * 100) + "%"
+    table = PrettyTable()
+    table.field_names = list(TABLE_CAPTION.values()) + ["Total Plays", "Win %", "Loss %", "Push %"]
+    table.add_row(list(results.values()) + [sum(results.values()), win, loss, push])
+    print(table)
+
+
+    
+
+t = threading.Thread(target=updates, args=[b])
+t.daemon = True
+t.start()
+
 while True:
     b.update()
-    b.update_value()
-    b.update_policy()
+
 
 
